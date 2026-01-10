@@ -48,6 +48,19 @@ export function DashboardContent({ user }: DashboardContentProps) {
     enabled: isConnected && (isStreaming || isRecording),
   });
 
+  // Calculate time since last heard for UI feedback
+  const getVoiceStatusText = () => {
+    if (!voiceCommand.isSupported) return 'Not Supported';
+    if (!voiceCommand.isListening) return 'Inactive';
+    if (voiceCommand.lastHeardAt) {
+      const secondsAgo = Math.floor((Date.now() - voiceCommand.lastHeardAt) / 1000);
+      if (secondsAgo < 3) return 'Hearing you...';
+      if (secondsAgo < 10) return 'Listening...';
+      return `Listening (${secondsAgo}s silence)`;
+    }
+    return 'Listening...';
+  };
+
   // Handle hotkey clip (Ctrl+Shift+C)
   const handleHotkeyClip = useCallback(() => {
     if (isConnected && (isStreaming || isRecording)) {
@@ -107,7 +120,9 @@ export function DashboardContent({ user }: DashboardContentProps) {
                     className={
                       'w-3 h-3 rounded-full ' +
                       (voiceCommand.isListening
-                        ? 'bg-green-500 animate-pulse'
+                        ? voiceCommand.lastHeardAt && (Date.now() - voiceCommand.lastHeardAt) < 3000
+                          ? 'bg-green-500 animate-pulse'
+                          : 'bg-yellow-500'
                         : voiceCommand.isSupported
                           ? 'bg-gray-400'
                           : 'bg-red-500')
@@ -122,23 +137,31 @@ export function DashboardContent({ user }: DashboardContentProps) {
               <CardContent className="space-y-4">
                 <div className="flex items-center justify-between">
                   <span className="text-sm">Status</span>
-                  <Badge variant="outline">
-                    {!voiceCommand.isSupported
-                      ? 'Not Supported'
-                      : voiceCommand.isListening
-                        ? 'Listening...'
-                        : 'Inactive'}
+                  <Badge
+                    variant={
+                      voiceCommand.isListening
+                        ? voiceCommand.lastHeardAt && (Date.now() - voiceCommand.lastHeardAt) < 3000
+                          ? 'default'
+                          : 'outline'
+                        : 'secondary'
+                    }
+                  >
+                    {getVoiceStatusText()}
                   </Badge>
                 </div>
 
                 {voiceCommand.error && (
-                  <p className="text-xs text-red-500">{voiceCommand.error}</p>
+                  <div className="p-2 bg-red-50 border border-red-200 rounded text-xs text-red-600">
+                    {voiceCommand.error}
+                  </div>
                 )}
 
-                {voiceCommand.lastTranscript && (
-                  <div className="text-xs text-muted-foreground">
+                {voiceCommand.lastTranscript && voiceCommand.isListening && (
+                  <div className="p-2 bg-muted rounded text-xs">
                     <span className="font-medium">Heard: </span>
-                    {voiceCommand.lastTranscript.slice(-50)}
+                    <span className="text-muted-foreground">
+                      {voiceCommand.lastTranscript.slice(-60)}
+                    </span>
                   </div>
                 )}
 
@@ -152,19 +175,29 @@ export function DashboardContent({ user }: DashboardContentProps) {
                       Start Listening
                     </Button>
                   ) : (
-                    <Button
-                      onClick={voiceCommand.stop}
-                      variant="outline"
-                      className="flex-1"
-                    >
-                      Stop Listening
-                    </Button>
+                    <>
+                      <Button
+                        onClick={voiceCommand.stop}
+                        variant="outline"
+                        className="flex-1"
+                      >
+                        Stop
+                      </Button>
+                      <Button
+                        onClick={voiceCommand.restart}
+                        variant="secondary"
+                        title="Restart voice recognition if it stops working"
+                      >
+                        Restart
+                      </Button>
+                    </>
                   )}
                 </div>
 
                 <p className="text-xs text-muted-foreground">
-                  Voice recognition requires microphone permission and OBS
-                  connection
+                  {voiceCommand.isListening
+                    ? 'Auto-restarts if it stops. Click "Restart" if having issues.'
+                    : 'Requires microphone permission and OBS connection.'}
                 </p>
               </CardContent>
             </Card>

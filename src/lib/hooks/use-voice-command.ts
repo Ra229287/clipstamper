@@ -13,6 +13,7 @@ interface VoiceCommandState {
   isSupported: boolean;
   error: string | null;
   lastTranscript: string;
+  lastHeardAt: number | null; // Track when we last heard something
 }
 
 // Extend Window for SpeechRecognition
@@ -30,6 +31,7 @@ type SpeechRecognition = {
   lang: string;
   start: () => void;
   stop: () => void;
+  abort: () => void;
   onresult: ((event: SpeechRecognitionEvent) => void) | null;
   onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
   onend: (() => void) | null;
@@ -53,19 +55,29 @@ export function useVoiceCommand({
   triggerPhrase = 'clip it',
   onTrigger,
   enabled = true,
-}: UseVoiceCommandOptions): VoiceCommandState & { start: () => void; stop: () => void } {
+}: UseVoiceCommandOptions): VoiceCommandState & {
+  start: () => void;
+  stop: () => void;
+  restart: () => void;
+} {
   const [state, setState] = useState<VoiceCommandState>({
     isListening: false,
     isSupported: false,
     error: null,
     lastTranscript: '',
+    lastHeardAt: null,
   });
-  
+
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const isEnabledRef = useRef(enabled);
   const isListeningRef = useRef(false);
   const lastTriggerTimeRef = useRef<number>(0);
+  const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const restartAttemptsRef = useRef(0);
+  const maxRestartAttempts = 5;
   const COOLDOWN_MS = 3000; // 3 second cooldown between triggers
+  const WATCHDOG_INTERVAL = 5000; // Check every 5 seconds
+  const SILENCE_TIMEOUT = 30000; // Restart if no audio for 30 seconds
 
   // Update refs when values change
   useEffect(() => {
@@ -75,35 +87,24 @@ export function useVoiceCommand({
   useEffect(() => {
     isListeningRef.current = state.isListening;
   }, [state.isListening]);
-  
-  // Initialize speech recognition
-  useEffect(() => {
-    console.log('[Voice] Initializing speech recognition...');
-    console.log('[Voice] window defined:', typeof window !== 'undefined');
 
-    if (typeof window === 'undefined') {
-      console.log('[Voice] Window undefined, skipping init');
-      return;
-    }
+  // Create recognition instance
+  const createRecognition = useCallback(() => {
+    if (typeof window === 'undefined') return null;
 
     const SpeechRecognitionAPI = window.SpeechRecognition ?? window.webkitSpeechRecognition;
-    console.log('[Voice] SpeechRecognition API available:', !!SpeechRecognitionAPI);
-
-    if (!SpeechRecognitionAPI) {
-      console.log('[Voice] Speech recognition NOT supported in this browser');
-      setState(prev => ({ ...prev, isSupported: false }));
-      return;
-    }
-
-    console.log('[Voice] Creating recognition instance...');
-    setState(prev => ({ ...prev, isSupported: true }));
+    if (!SpeechRecognitionAPI) return null;
 
     const recognition = new SpeechRecognitionAPI();
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = 'en-US';
-    console.log('[Voice] Recognition configured: continuous=true, interimResults=true, lang=en-US');
-    
+
+    return recognition;
+  }, []);
+
+  // Setup recognition handlers
+  const setupRecognition = useCallback((recognition: SpeechRecognition) => {
     recognition.onresult = (event: SpeechRecognitionEvent) => {
       const results = Array.from(event.results);
       const transcript = results
@@ -111,119 +112,221 @@ export function useVoiceCommand({
         .join(' ')
         .toLowerCase();
 
-      console.log('[Voice] Heard:', transcript);
-      setState(prev => ({ ...prev, lastTranscript: transcript }));
-
-      // Check for trigger phrase
-      const phraseFound = transcript.includes(triggerPhrase.toLowerCase());
       const now = Date.now();
+      setState(prev => ({ ...prev, lastTranscript: transcript, lastHeardAt: now }));
+
+      // Check for trigger phrase with cooldown
+      const phraseFound = transcript.includes(triggerPhrase.toLowerCase());
       const timeSinceLastTrigger = now - lastTriggerTimeRef.current;
       const cooldownActive = timeSinceLastTrigger < COOLDOWN_MS;
 
-      console.log('[Voice] Looking for:', triggerPhrase, '| Found:', phraseFound, '| Enabled:', isEnabledRef.current, '| Cooldown:', cooldownActive ? `${Math.ceil((COOLDOWN_MS - timeSinceLastTrigger) / 1000)}s left` : 'ready');
-
       if (phraseFound && isEnabledRef.current && !cooldownActive) {
-        console.log('[Voice] TRIGGERING callback!');
+        console.log('[Voice] CLIP IT detected - triggering!');
         lastTriggerTimeRef.current = now;
         onTrigger();
       }
     };
-    
+
     recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-      setState(prev => ({ 
-        ...prev, 
-        error: 'Speech recognition error: ' + event.error,
-        isListening: false,
-      }));
+      console.log('[Voice] Error:', event.error);
+
+      // Handle different error types
+      if (event.error === 'not-allowed') {
+        setState(prev => ({
+          ...prev,
+          error: 'Microphone access denied. Please allow microphone permission.',
+          isListening: false,
+        }));
+      } else if (event.error === 'no-speech') {
+        // This is normal - just means silence, don't show error
+        console.log('[Voice] No speech detected, continuing...');
+      } else if (event.error === 'network') {
+        setState(prev => ({
+          ...prev,
+          error: 'Network error. Speech recognition requires internet.',
+        }));
+      } else if (event.error === 'aborted') {
+        // User or system aborted, this is fine
+        console.log('[Voice] Recognition aborted');
+      } else {
+        setState(prev => ({
+          ...prev,
+          error: `Speech error: ${event.error}`,
+        }));
+      }
     };
-    
+
     recognition.onend = () => {
-      console.log('[Voice] onend fired, enabled:', isEnabledRef.current, 'isListening:', isListeningRef.current);
-      // Auto-restart if still enabled and listening
-      if (isEnabledRef.current && isListeningRef.current) {
-        console.log('[Voice] Auto-restarting recognition...');
-        try {
-          recognition.start();
-        } catch (e) {
-          console.log('[Voice] Auto-restart failed (may already be started):', e);
+      console.log('[Voice] Recognition ended');
+
+      // Auto-restart if we should still be listening
+      if (isListeningRef.current && isEnabledRef.current) {
+        if (restartAttemptsRef.current < maxRestartAttempts) {
+          restartAttemptsRef.current++;
+          console.log('[Voice] Auto-restarting... (attempt', restartAttemptsRef.current, ')');
+
+          // Small delay before restart to avoid rapid cycling
+          setTimeout(() => {
+            try {
+              recognition.start();
+              restartAttemptsRef.current = 0; // Reset on successful start
+            } catch (e) {
+              console.log('[Voice] Restart failed:', e);
+            }
+          }, 100);
+        } else {
+          console.log('[Voice] Max restart attempts reached, stopping');
+          setState(prev => ({
+            ...prev,
+            isListening: false,
+            error: 'Voice recognition stopped. Click "Start Listening" to try again.',
+          }));
+          restartAttemptsRef.current = 0;
         }
       } else {
-        console.log('[Voice] Not restarting - setting isListening to false');
         setState(prev => ({ ...prev, isListening: false }));
       }
     };
-    
-    // Add onstart handler for debugging
+
     recognition.onstart = () => {
-      console.log('[Voice] >>> Recognition STARTED - now listening for audio');
+      console.log('[Voice] Recognition started');
+      restartAttemptsRef.current = 0;
+      setState(prev => ({ ...prev, error: null }));
     };
 
     recognition.onaudiostart = () => {
-      console.log('[Voice] >>> Audio capture STARTED - microphone active');
+      setState(prev => ({ ...prev, lastHeardAt: Date.now() }));
     };
 
-    recognition.onaudioend = () => {
-      console.log('[Voice] <<< Audio capture ended');
-    };
+    return recognition;
+  }, [triggerPhrase, onTrigger, COOLDOWN_MS]);
 
-    recognition.onsoundstart = () => {
-      console.log('[Voice] Sound detected!');
-    };
+  // Initialize speech recognition
+  useEffect(() => {
+    const recognition = createRecognition();
 
-    recognition.onspeechstart = () => {
-      console.log('[Voice] Speech detected!');
-    };
+    if (!recognition) {
+      setState(prev => ({ ...prev, isSupported: false }));
+      return;
+    }
 
+    setState(prev => ({ ...prev, isSupported: true }));
+    setupRecognition(recognition);
     recognitionRef.current = recognition;
-    console.log('[Voice] Recognition instance stored in ref');
 
     return () => {
-      console.log('[Voice] Cleanup - stopping recognition');
-      recognition.onresult = null;
-      recognition.onerror = null;
-      recognition.onend = null;
-      recognition.onstart = null;
-      recognition.onaudiostart = null;
-      recognition.onaudioend = null;
-      recognition.onsoundstart = null;
-      recognition.onspeechstart = null;
+      if (watchdogRef.current) {
+        clearInterval(watchdogRef.current);
+      }
       try {
-        recognition.stop();
+        recognition.abort();
       } catch {
-        // Already stopped, ignore
+        // Ignore
       }
     };
-    // NOTE: Do NOT include state.isListening - it causes cleanup/reinit when starting
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [triggerPhrase, onTrigger]);
-  
+  }, [createRecognition, setupRecognition]);
+
+  // Watchdog timer - detect silent failures and restart
+  useEffect(() => {
+    if (!state.isListening) {
+      if (watchdogRef.current) {
+        clearInterval(watchdogRef.current);
+        watchdogRef.current = null;
+      }
+      return;
+    }
+
+    watchdogRef.current = setInterval(() => {
+      const now = Date.now();
+      const lastHeard = state.lastHeardAt ?? now;
+      const silenceDuration = now - lastHeard;
+
+      // If we haven't heard anything for a while, recognition might have silently died
+      if (silenceDuration > SILENCE_TIMEOUT && isListeningRef.current) {
+        console.log('[Voice] Watchdog: No audio for', Math.round(silenceDuration / 1000), 's - restarting');
+
+        // Force restart
+        if (recognitionRef.current) {
+          try {
+            recognitionRef.current.abort();
+          } catch {
+            // Ignore
+          }
+
+          setTimeout(() => {
+            try {
+              recognitionRef.current?.start();
+              setState(prev => ({ ...prev, lastHeardAt: Date.now() }));
+            } catch (e) {
+              console.log('[Voice] Watchdog restart failed:', e);
+            }
+          }, 200);
+        }
+      }
+    }, WATCHDOG_INTERVAL);
+
+    return () => {
+      if (watchdogRef.current) {
+        clearInterval(watchdogRef.current);
+        watchdogRef.current = null;
+      }
+    };
+  }, [state.isListening, state.lastHeardAt, SILENCE_TIMEOUT, WATCHDOG_INTERVAL]);
+
   const start = useCallback(() => {
-    console.log('[Voice] start() called, isSupported:', state.isSupported, 'recognition:', !!recognitionRef.current);
-    if (!recognitionRef.current || !state.isSupported) return;
+    if (!recognitionRef.current || !state.isSupported) {
+      setState(prev => ({ ...prev, error: 'Speech recognition not supported' }));
+      return;
+    }
 
     try {
       recognitionRef.current.start();
-      console.log('[Voice] Recognition started successfully');
-      setState(prev => ({ ...prev, isListening: true, error: null }));
-    } catch (err) {
-      console.error('[Voice] Failed to start:', err);
+      restartAttemptsRef.current = 0;
       setState(prev => ({
         ...prev,
-        error: err instanceof Error ? err.message : 'Failed to start recognition',
+        isListening: true,
+        error: null,
+        lastHeardAt: Date.now(),
       }));
+    } catch (err) {
+      // Might already be started
+      if (err instanceof Error && err.message.includes('already started')) {
+        setState(prev => ({ ...prev, isListening: true }));
+      } else {
+        setState(prev => ({
+          ...prev,
+          error: err instanceof Error ? err.message : 'Failed to start',
+        }));
+      }
     }
   }, [state.isSupported]);
-  
+
   const stop = useCallback(() => {
     if (!recognitionRef.current) return;
-    
+
     try {
-      recognitionRef.current.stop();
-      setState(prev => ({ ...prev, isListening: false }));
+      recognitionRef.current.abort();
+      setState(prev => ({ ...prev, isListening: false, lastHeardAt: null }));
     } catch {
-      // Already stopped, ignore
+      // Ignore
     }
   }, []);
-  
-  return { ...state, start, stop };
+
+  const restart = useCallback(() => {
+    console.log('[Voice] Manual restart requested');
+    stop();
+
+    // Recreate recognition instance for clean slate
+    const newRecognition = createRecognition();
+    if (newRecognition) {
+      setupRecognition(newRecognition);
+      recognitionRef.current = newRecognition;
+
+      setTimeout(() => {
+        start();
+      }, 200);
+    }
+  }, [stop, start, createRecognition, setupRecognition]);
+
+  return { ...state, start, stop, restart };
 }
