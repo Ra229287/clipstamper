@@ -33,8 +33,12 @@ export function DashboardContent({ user }: DashboardContentProps) {
 
   // Voice command handler - creates clip marker when "clip it" is detected
   const handleVoiceTrigger = useCallback(() => {
+    console.log('[Voice] Trigger detected! isConnected:', isConnected, 'isStreaming:', isStreaming, 'isRecording:', isRecording);
     if (isConnected && (isStreaming || isRecording)) {
+      console.log('[Voice] Creating clip marker...');
       createClipMarker('voice');
+    } else {
+      console.log('[Voice] Conditions not met for clip creation');
     }
   }, [isConnected, isStreaming, isRecording, createClipMarker]);
 

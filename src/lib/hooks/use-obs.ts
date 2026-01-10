@@ -136,17 +136,23 @@ export function useOBS(): UseOBSReturn {
         return;
       }
 
+      // Get BOTH stream and record status, use the longer one
       let obsDuration = 0;
 
       if (isStreaming) {
         const status = await obsService.getStreamStatus();
-        if (status.ok) {
+        if (status.ok && status.data.outputActive) {
           obsDuration = status.data.outputDuration;
         }
-      } else if (isRecording) {
+      }
+
+      if (isRecording) {
         const status = await obsService.getRecordStatus();
-        if (status.ok) {
-          obsDuration = status.data.outputDuration;
+        if (status.ok && status.data.outputActive) {
+          // Use recording duration if it's longer
+          if (status.data.outputDuration > obsDuration) {
+            obsDuration = status.data.outputDuration;
+          }
         }
       }
 
@@ -178,29 +184,48 @@ export function useOBS(): UseOBSReturn {
 
     const checkStatus = async () => {
       const streamStatus = await obsService.getStreamStatus();
+      const recordStatus = await obsService.getRecordStatus();
+
+      console.log('[OBS Debug] ===== STATUS CHECK =====');
       console.log('[OBS Debug] Stream status:', streamStatus);
+      console.log('[OBS Debug] Record status:', recordStatus);
+
       if (streamStatus.ok) {
+        console.log('[OBS Debug] Stream active:', streamStatus.data.outputActive);
+        console.log('[OBS Debug] Stream duration:', streamStatus.data.outputDuration, 'ms =', Math.floor(streamStatus.data.outputDuration / 1000 / 60), 'min');
+        console.log('[OBS Debug] Stream timecode:', streamStatus.data.outputTimecode);
         setIsStreaming(streamStatus.data.outputActive);
-        if (streamStatus.data.outputActive) {
-          const obsDuration = streamStatus.data.outputDuration;
-          console.log('[OBS Debug] Initial duration from OBS:', obsDuration, 'ms =', Math.floor(obsDuration / 1000 / 60), 'minutes');
-          console.log('[OBS Debug] Timecode from OBS:', streamStatus.data.outputTimecode);
-          setStreamDuration(obsDuration);
-          // Calculate when stream actually started based on OBS duration
-          streamStartRef.current = Date.now() - obsDuration;
-          maxDurationSeenRef.current = obsDuration;
+      }
+
+      if (recordStatus.ok) {
+        console.log('[OBS Debug] Record active:', recordStatus.data.outputActive);
+        console.log('[OBS Debug] Record duration:', recordStatus.data.outputDuration, 'ms =', Math.floor(recordStatus.data.outputDuration / 1000 / 60), 'min');
+        console.log('[OBS Debug] Record timecode:', recordStatus.data.outputTimecode);
+        setIsRecording(recordStatus.data.outputActive);
+      }
+
+      // Use the LONGER duration (in case one started before the other)
+      let bestDuration = 0;
+      let durationSource = 'none';
+
+      if (streamStatus.ok && streamStatus.data.outputActive) {
+        bestDuration = streamStatus.data.outputDuration;
+        durationSource = 'stream';
+      }
+
+      if (recordStatus.ok && recordStatus.data.outputActive) {
+        if (recordStatus.data.outputDuration > bestDuration) {
+          bestDuration = recordStatus.data.outputDuration;
+          durationSource = 'record';
         }
       }
 
-      const recordStatus = await obsService.getRecordStatus();
-      if (recordStatus.ok) {
-        setIsRecording(recordStatus.data.outputActive);
-        // If recording but not streaming, use recording duration
-        if (recordStatus.data.outputActive && !streamStatus.ok) {
-          const obsDuration = recordStatus.data.outputDuration;
-          streamStartRef.current = Date.now() - obsDuration;
-          maxDurationSeenRef.current = obsDuration;
-        }
+      console.log('[OBS Debug] Using duration from:', durationSource, '=', bestDuration, 'ms =', Math.floor(bestDuration / 1000 / 60), 'min');
+
+      if (bestDuration > 0) {
+        setStreamDuration(bestDuration);
+        streamStartRef.current = Date.now() - bestDuration;
+        maxDurationSeenRef.current = bestDuration;
       }
 
       const replayStatus = await obsService.getReplayBufferStatus();

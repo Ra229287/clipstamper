@@ -88,11 +88,16 @@ export function useVoiceCommand({
         .map(result => result[0]?.transcript ?? '')
         .join(' ')
         .toLowerCase();
-      
+
+      console.log('[Voice] Heard:', transcript);
       setState(prev => ({ ...prev, lastTranscript: transcript }));
-      
+
       // Check for trigger phrase
-      if (transcript.includes(triggerPhrase.toLowerCase()) && isEnabledRef.current) {
+      const phraseFound = transcript.includes(triggerPhrase.toLowerCase());
+      console.log('[Voice] Looking for:', triggerPhrase, '| Found:', phraseFound, '| Enabled:', isEnabledRef.current);
+
+      if (phraseFound && isEnabledRef.current) {
+        console.log('[Voice] TRIGGERING callback!');
         onTrigger();
       }
     };
@@ -106,14 +111,17 @@ export function useVoiceCommand({
     };
     
     recognition.onend = () => {
+      console.log('[Voice] onend fired, enabled:', isEnabledRef.current, 'isListening:', state.isListening);
       // Auto-restart if still enabled
       if (isEnabledRef.current && state.isListening) {
+        console.log('[Voice] Auto-restarting recognition...');
         try {
           recognition.start();
-        } catch {
-          // Already started, ignore
+        } catch (e) {
+          console.log('[Voice] Auto-restart failed (may already be started):', e);
         }
       } else {
+        console.log('[Voice] Not restarting - setting isListening to false');
         setState(prev => ({ ...prev, isListening: false }));
       }
     };
@@ -133,14 +141,17 @@ export function useVoiceCommand({
   }, [triggerPhrase, onTrigger, state.isListening]);
   
   const start = useCallback(() => {
+    console.log('[Voice] start() called, isSupported:', state.isSupported, 'recognition:', !!recognitionRef.current);
     if (!recognitionRef.current || !state.isSupported) return;
-    
+
     try {
       recognitionRef.current.start();
+      console.log('[Voice] Recognition started successfully');
       setState(prev => ({ ...prev, isListening: true, error: null }));
     } catch (err) {
-      setState(prev => ({ 
-        ...prev, 
+      console.error('[Voice] Failed to start:', err);
+      setState(prev => ({
+        ...prev,
         error: err instanceof Error ? err.message : 'Failed to start recognition',
       }));
     }
