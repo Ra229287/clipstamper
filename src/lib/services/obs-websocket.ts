@@ -227,18 +227,25 @@ class OBSWebSocketService {
     source: 'voice' | 'hotkey' | 'manual',
     label?: string
   ): Promise<OBSResult<ClipMarker>> {
-    // Get current stream/record timestamp
+    // Get current stream/record timestamp - use the LONGER duration
+    // (same logic as display, in case recording started before streaming)
     let timestamp = 0;
 
     const streamStatus = await this.getStreamStatus();
+    const recordStatus = await this.getRecordStatus();
+
     if (streamStatus.ok && streamStatus.data.outputActive) {
       timestamp = streamStatus.data.outputDuration;
-    } else {
-      const recordStatus = await this.getRecordStatus();
-      if (recordStatus.ok && recordStatus.data.outputActive) {
+    }
+
+    if (recordStatus.ok && recordStatus.data.outputActive) {
+      // Use recording duration if it's longer
+      if (recordStatus.data.outputDuration > timestamp) {
         timestamp = recordStatus.data.outputDuration;
       }
     }
+
+    console.log('[OBS] Creating clip marker at timestamp:', timestamp, 'ms =', Math.floor(timestamp / 1000 / 60), 'min');
 
     // Create clip marker with correlation ID (H70: Event tracing)
     const marker: ClipMarker = {
