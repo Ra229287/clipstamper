@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { obsService } from '../services/obs-websocket';
 import type { OBSConnectionState, OBSConfig, ClipMarker } from '../types/obs';
 
@@ -38,6 +38,10 @@ export function useOBS(): UseOBSReturn {
   const [isRecording, setIsRecording] = useState(false);
   const [isReplayBufferActive, setIsReplayBufferActive] = useState(false);
 
+  // Track stream start time and max duration seen (to handle OBS reconnects)
+  const streamStartRef = useRef<number | null>(null);
+  const maxDurationSeenRef = useRef<number>(0);
+
   // Subscribe to OBS events
   useEffect(() => {
     const unsubscribers: (() => void)[] = [];
@@ -66,6 +70,9 @@ export function useOBS(): UseOBSReturn {
     unsubscribers.push(
       obsService.on('streamStarted', () => {
         setIsStreaming(true);
+        // Reset tracking for new stream
+        streamStartRef.current = Date.now();
+        maxDurationSeenRef.current = 0;
       })
     );
 
@@ -73,6 +80,8 @@ export function useOBS(): UseOBSReturn {
       obsService.on('streamStopped', () => {
         setIsStreaming(false);
         setStreamDuration(null);
+        streamStartRef.current = null;
+        maxDurationSeenRef.current = 0;
       })
     );
 
@@ -80,6 +89,11 @@ export function useOBS(): UseOBSReturn {
     unsubscribers.push(
       obsService.on('recordingStarted', () => {
         setIsRecording(true);
+        // Reset tracking for new recording if not streaming
+        if (!streamStartRef.current) {
+          streamStartRef.current = Date.now();
+          maxDurationSeenRef.current = 0;
+        }
       })
     );
 
@@ -100,19 +114,40 @@ export function useOBS(): UseOBSReturn {
   }, []);
 
   // Poll stream duration when streaming
+  // Handles OBS reconnects by tracking max duration seen
   useEffect(() => {
     if (!isStreaming && !isRecording) return;
 
     const interval = setInterval(async () => {
+      let obsDuration = 0;
+
       if (isStreaming) {
         const status = await obsService.getStreamStatus();
         if (status.ok) {
-          setStreamDuration(status.data.outputDuration);
+          obsDuration = status.data.outputDuration;
         }
       } else if (isRecording) {
         const status = await obsService.getRecordStatus();
         if (status.ok) {
-          setStreamDuration(status.data.outputDuration);
+          obsDuration = status.data.outputDuration;
+        }
+      }
+
+      // If OBS duration dropped (reconnect happened), use our local tracking
+      // OBS resets outputDuration when it reconnects to streaming service
+      if (obsDuration < maxDurationSeenRef.current && streamStartRef.current) {
+        // OBS reconnected - calculate duration from when we first saw the stream
+        // Add what we had before the reconnect + current OBS duration
+        const localDuration = Date.now() - streamStartRef.current;
+        setStreamDuration(localDuration);
+      } else {
+        // Normal case - use OBS duration and track max seen
+        maxDurationSeenRef.current = Math.max(maxDurationSeenRef.current, obsDuration);
+        setStreamDuration(obsDuration);
+
+        // If we don't have a start time yet, calculate it from OBS duration
+        if (!streamStartRef.current && obsDuration > 0) {
+          streamStartRef.current = Date.now() - obsDuration;
         }
       }
     }, 1000);
@@ -129,13 +164,23 @@ export function useOBS(): UseOBSReturn {
       if (streamStatus.ok) {
         setIsStreaming(streamStatus.data.outputActive);
         if (streamStatus.data.outputActive) {
-          setStreamDuration(streamStatus.data.outputDuration);
+          const obsDuration = streamStatus.data.outputDuration;
+          setStreamDuration(obsDuration);
+          // Calculate when stream actually started based on OBS duration
+          streamStartRef.current = Date.now() - obsDuration;
+          maxDurationSeenRef.current = obsDuration;
         }
       }
 
       const recordStatus = await obsService.getRecordStatus();
       if (recordStatus.ok) {
         setIsRecording(recordStatus.data.outputActive);
+        // If recording but not streaming, use recording duration
+        if (recordStatus.data.outputActive && !streamStatus.ok) {
+          const obsDuration = recordStatus.data.outputDuration;
+          streamStartRef.current = Date.now() - obsDuration;
+          maxDurationSeenRef.current = obsDuration;
+        }
       }
 
       const replayStatus = await obsService.getReplayBufferStatus();
