@@ -102,6 +102,9 @@ export function OBSConnection() {
     isReplayBufferActive,
     startReplayBuffer,
     stopReplayBuffer,
+    setManualStartTime,
+    hasManualOverride,
+    clearManualOverride,
   } = useOBS();
 
   const [host, setHost] = useState('localhost');
@@ -109,6 +112,9 @@ export function OBSConnection() {
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [showGuide, setShowGuide] = useState(false);
+  const [showTimeOverride, setShowTimeOverride] = useState(false);
+  const [manualHours, setManualHours] = useState('');
+  const [manualMinutes, setManualMinutes] = useState('');
 
   const handleConnect = async () => {
     setIsLoading(true);
@@ -134,6 +140,17 @@ export function OBSConnection() {
 
   const handleManualClip = async () => {
     await createClipMarker('manual');
+  };
+
+  const handleSetManualTime = () => {
+    const hours = parseInt(manualHours, 10) || 0;
+    const minutes = parseInt(manualMinutes, 10) || 0;
+    const totalMs = (hours * 60 + minutes) * 60 * 1000;
+    const startTime = new Date(Date.now() - totalMs);
+    setManualStartTime(startTime);
+    setShowTimeOverride(false);
+    setManualHours('');
+    setManualMinutes('');
   };
 
   return (
@@ -247,7 +264,66 @@ export function OBSConnection() {
             </div>
 
             {(isStreaming || isRecording) && streamDuration !== null && (
-              <div className="text-center text-2xl font-mono">{formatTimestamp(streamDuration)}</div>
+              <div className="space-y-2">
+                <div className="text-center">
+                  <span className="text-2xl font-mono">{formatTimestamp(streamDuration)}</span>
+                  {hasManualOverride && (
+                    <span className="ml-2 text-xs text-blue-500">(manual)</span>
+                  )}
+                </div>
+
+                {/* Time Override Controls */}
+                {!showTimeOverride ? (
+                  <button
+                    onClick={() => setShowTimeOverride(true)}
+                    className="w-full text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    {hasManualOverride ? 'Adjust time override' : 'Wrong time? Click to fix'}
+                  </button>
+                ) : (
+                  <div className="p-3 border rounded-md bg-muted/50 space-y-2">
+                    <p className="text-xs font-medium">How long have you been streaming?</p>
+                    <div className="flex gap-2 items-center">
+                      <Input
+                        type="number"
+                        min="0"
+                        placeholder="Hours"
+                        value={manualHours}
+                        onChange={(e) => setManualHours(e.target.value)}
+                        className="w-20 text-center"
+                      />
+                      <span className="text-sm">h</span>
+                      <Input
+                        type="number"
+                        min="0"
+                        max="59"
+                        placeholder="Min"
+                        value={manualMinutes}
+                        onChange={(e) => setManualMinutes(e.target.value)}
+                        className="w-20 text-center"
+                      />
+                      <span className="text-sm">m</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button size="sm" onClick={handleSetManualTime} className="flex-1">
+                        Set Time
+                      </Button>
+                      {hasManualOverride && (
+                        <Button size="sm" variant="outline" onClick={clearManualOverride}>
+                          Use OBS
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setShowTimeOverride(false)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
 
             {/* Replay Buffer Controls */}

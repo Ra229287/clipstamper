@@ -18,6 +18,11 @@ interface UseOBSReturn {
   isStreaming: boolean;
   isRecording: boolean;
 
+  // Manual stream start override (when OBS reconnected and lost time)
+  setManualStartTime: (startTime: Date) => void;
+  hasManualOverride: boolean;
+  clearManualOverride: () => void;
+
   // Clip markers
   clipMarkers: ClipMarker[];
   createClipMarker: (source: 'voice' | 'hotkey' | 'manual', label?: string) => Promise<boolean>;
@@ -41,6 +46,10 @@ export function useOBS(): UseOBSReturn {
   // Track stream start time and max duration seen (to handle OBS reconnects)
   const streamStartRef = useRef<number | null>(null);
   const maxDurationSeenRef = useRef<number>(0);
+
+  // Manual override for when OBS lost time due to reconnect
+  const [manualStartTime, setManualStartTimeState] = useState<number | null>(null);
+  const hasManualOverride = manualStartTime !== null;
 
   // Subscribe to OBS events
   useEffect(() => {
@@ -115,10 +124,18 @@ export function useOBS(): UseOBSReturn {
 
   // Poll stream duration when streaming
   // Handles OBS reconnects by tracking max duration seen
+  // Also supports manual override when OBS lost time before we connected
   useEffect(() => {
     if (!isStreaming && !isRecording) return;
 
     const interval = setInterval(async () => {
+      // If manual override is set, always use that
+      if (manualStartTime !== null) {
+        const manualDuration = Date.now() - manualStartTime;
+        setStreamDuration(manualDuration);
+        return;
+      }
+
       let obsDuration = 0;
 
       if (isStreaming) {
@@ -153,7 +170,7 @@ export function useOBS(): UseOBSReturn {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [isStreaming, isRecording]);
+  }, [isStreaming, isRecording, manualStartTime]);
 
   // Check initial stream/record/replay status on connect
   useEffect(() => {
@@ -161,10 +178,13 @@ export function useOBS(): UseOBSReturn {
 
     const checkStatus = async () => {
       const streamStatus = await obsService.getStreamStatus();
+      console.log('[OBS Debug] Stream status:', streamStatus);
       if (streamStatus.ok) {
         setIsStreaming(streamStatus.data.outputActive);
         if (streamStatus.data.outputActive) {
           const obsDuration = streamStatus.data.outputDuration;
+          console.log('[OBS Debug] Initial duration from OBS:', obsDuration, 'ms =', Math.floor(obsDuration / 1000 / 60), 'minutes');
+          console.log('[OBS Debug] Timecode from OBS:', streamStatus.data.outputTimecode);
           setStreamDuration(obsDuration);
           // Calculate when stream actually started based on OBS duration
           streamStartRef.current = Date.now() - obsDuration;
@@ -213,6 +233,17 @@ export function useOBS(): UseOBSReturn {
     obsService.clearClipMarkers();
   }, []);
 
+  // Manual start time override functions
+  const setManualStartTime = useCallback((startTime: Date) => {
+    setManualStartTimeState(startTime.getTime());
+    console.log('[OBS] Manual start time set to:', startTime.toLocaleTimeString());
+  }, []);
+
+  const clearManualOverride = useCallback(() => {
+    setManualStartTimeState(null);
+    console.log('[OBS] Manual override cleared, using OBS duration');
+  }, []);
+
   const startReplayBuffer = useCallback(async (): Promise<boolean> => {
     const result = await obsService.startReplayBuffer();
     if (result.ok) {
@@ -242,6 +273,9 @@ export function useOBS(): UseOBSReturn {
     streamDuration,
     isStreaming,
     isRecording,
+    setManualStartTime,
+    hasManualOverride,
+    clearManualOverride,
     clipMarkers,
     createClipMarker,
     clearClipMarkers,
